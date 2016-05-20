@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"os"
 	"sync"
@@ -86,8 +87,8 @@ func (w *Watcher) handleSubnetEvents(batch []subnet.Event) {
 		case subnet.EventAdded:
 			log.Infof("Subnet added: %v via %v", evt.Lease.Subnet, evt.Lease.Attrs.PublicIP)
 
-			if evt.Lease.Attrs.BackendType != "host-gw" {
-				log.Warningf("Ignoring non-host-gw subnet: type=%v", evt.Lease.Attrs.BackendType)
+			if evt.Lease.Attrs.BackendType != "alloc" {
+				log.Warningf("Ignoring non-alloc subnet: type=%v", evt.Lease.Attrs.BackendType)
 				continue
 			}
 
@@ -97,12 +98,16 @@ func (w *Watcher) handleSubnetEvents(batch []subnet.Event) {
 			}
 
 			w.addToRouteList(route)
+			err := w.createVPCRoute(route)
+			if err != nil {
+				log.Errorf("Error creating route:", err.Error())
+			}
 
 		case subnet.EventRemoved:
 			log.Info("Subnet removed: ", evt.Lease.Subnet)
 
-			if evt.Lease.Attrs.BackendType != "host-gw" {
-				log.Warningf("Ignoring non-host-gw subnet: type=%v", evt.Lease.Attrs.BackendType)
+			if evt.Lease.Attrs.BackendType != "alloc" {
+				log.Warningf("Ignoring non-alloc subnet: type=%v", evt.Lease.Attrs.BackendType)
 				continue
 			}
 
@@ -111,6 +116,10 @@ func (w *Watcher) handleSubnetEvents(batch []subnet.Event) {
 				Gw:  evt.Lease.Attrs.PublicIP.ToIP(),
 			}
 
+			err := w.removeVPCRoute(route)
+			if err != nil {
+				log.Errorf("Error removing route:", err.Error())
+			}
 			w.removeFromRouteList(route)
 
 		default:
@@ -130,6 +139,81 @@ func (w *Watcher) removeFromRouteList(route Route) {
 			return
 		}
 	}
+}
+
+func (w *Watcher) getInstanceIP2ID() (ip2id map[string]string, err error) {
+	client := ecs.NewClient(w.access_key_id, w.access_key_secret)
+	args2 := &ecs.DescribeInstancesArgs{
+		RegionId: common.Region(w.region),
+		VpcId:    w.vpc_id,
+	}
+	results2, _, err := client.DescribeInstances(args2)
+	if err != nil {
+		return
+	}
+
+	ip2id = make(map[string]string)
+	for _, instance := range results2 {
+		if len(instance.VpcAttributes.PrivateIpAddress.IpAddress) > 0 {
+			ip2id[instance.VpcAttributes.PrivateIpAddress.IpAddress[0]] = instance.InstanceId
+		}
+	}
+	return
+}
+
+func (w *Watcher) removeVPCRoute(route Route) (err error) {
+	ip2id, err := w.getInstanceIP2ID()
+	if err != nil {
+		return
+	}
+
+	var (
+		instanceId string
+		ok         bool
+	)
+	gw := route.Gw.String()
+	if instanceId, ok = ip2id[gw]; !ok {
+		err = errors.New("Unable to get instance id of Gw:" + gw)
+		return
+	}
+	args := &ecs.DeleteRouteEntryArgs{
+		RouteTableId:         w.route_table_id,
+		DestinationCidrBlock: route.Dst.String(),
+		NextHopId:            instanceId,
+	}
+	client := ecs.NewClient(w.access_key_id, w.access_key_secret)
+	err = client.DeleteRouteEntry(args)
+	if err != nil {
+		log.Errorf("Error deleting route to %v: %v, %v", route.Dst, route.Gw, err)
+	}
+	return
+}
+
+func (w *Watcher) createVPCRoute(route Route) (err error) {
+	ip2id, err := w.getInstanceIP2ID()
+	if err != nil {
+		return
+	}
+	var (
+		instanceId string
+		ok         bool
+	)
+	gw := route.Gw.String()
+	if instanceId, ok = ip2id[gw]; !ok {
+		err = errors.New("Unable to get instance id of Gw:" + gw)
+		return
+	}
+	client := ecs.NewClient(w.access_key_id, w.access_key_secret)
+	args := &ecs.CreateRouteEntryArgs{
+		RouteTableId:         w.route_table_id,
+		DestinationCidrBlock: route.Dst.String(),
+		NextHopId:            instanceId,
+	}
+	err = client.CreateRouteEntry(args)
+	if err != nil {
+		log.Errorf("Error adding route to %v: %v, %v", route.Dst, route.Gw, err)
+	}
+	return
 }
 
 func (w *Watcher) routeCheck(ctx context.Context) {
@@ -153,20 +237,10 @@ func (w *Watcher) checkSubnetExistInRoutes() {
 	if err != nil {
 		return
 	}
-	args2 := &ecs.DescribeInstancesArgs{
-		RegionId: common.Region(w.region),
-		VpcId:    w.vpc_id,
-	}
-	results2, _, err := client.DescribeInstances(args2)
+
+	ip2id, err := w.getInstanceIP2ID()
 	if err != nil {
 		return
-	}
-
-	ip2id := make(map[string]string)
-	for _, instance := range results2 {
-		if len(instance.VpcAttributes.PrivateIpAddress.IpAddress) > 0 {
-			ip2id[instance.VpcAttributes.PrivateIpAddress.IpAddress[0]] = instance.InstanceId
-		}
 	}
 
 	for _, route := range w.rl {
