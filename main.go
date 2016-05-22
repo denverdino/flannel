@@ -31,6 +31,7 @@ import (
 	"github.com/coreos/flannel/remote"
 	"github.com/coreos/flannel/subnet"
 	"github.com/coreos/flannel/version"
+	"github.com/coreos/flannel/watcher"
 
 	// Backends need to be imported for their init() to get executed and them to register
 	_ "github.com/coreos/flannel/backend/alloc"
@@ -144,6 +145,15 @@ func main() {
 		runFunc = func(ctx context.Context) {
 			nm.Run(ctx)
 		}
+	}
+
+	w, err := watcher.NewWatcher(ctx, sm)
+	if err != nil {
+		log.Error("Failed to create NetworkManager: ", err)
+		os.Exit(1)
+	}
+	runFunc = func(ctx context.Context) {
+		w.Run(ctx)
 	}
 
 	wg := sync.WaitGroup{}
