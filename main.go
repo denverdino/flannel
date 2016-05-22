@@ -55,6 +55,7 @@ type CmdLineOpts struct {
 	remoteKeyfile  string
 	remoteCertfile string
 	remoteCAFile   string
+	watch          string
 }
 
 var opts CmdLineOpts
@@ -70,6 +71,7 @@ func init() {
 	flag.StringVar(&opts.remoteKeyfile, "remote-keyfile", "", "SSL key file used to secure client/server communication")
 	flag.StringVar(&opts.remoteCertfile, "remote-certfile", "", "SSL certification file used to secure client/server communication")
 	flag.StringVar(&opts.remoteCAFile, "remote-cafile", "", "SSL Certificate Authority file used to secure client/server communication")
+	flag.StringVar(&opts.watch, "watch", "", "run in watch mode")
 	flag.BoolVar(&opts.help, "help", false, "print this message")
 	flag.BoolVar(&opts.version, "version", false, "print version and exit")
 }
@@ -126,7 +128,8 @@ func main() {
 
 	var runFunc func(ctx context.Context)
 
-	if opts.listen != "" {
+	switch {
+	case opts.listen != "":
 		if opts.remote != "" {
 			log.Error("--listen and --remote are mutually exclusive")
 			os.Exit(1)
@@ -135,7 +138,16 @@ func main() {
 		runFunc = func(ctx context.Context) {
 			remote.RunServer(ctx, sm, opts.listen, opts.remoteCAFile, opts.remoteCertfile, opts.remoteKeyfile)
 		}
-	} else {
+	case opts.watch != "":
+		w, err := watcher.NewWatcher(ctx, sm)
+		if err != nil {
+			log.Error("Failed to create NetworkManager: ", err)
+			os.Exit(1)
+		}
+		runFunc = func(ctx context.Context) {
+			w.Run(ctx)
+		}
+	default:
 		nm, err := network.NewNetworkManager(ctx, sm)
 		if err != nil {
 			log.Error("Failed to create NetworkManager: ", err)
@@ -145,15 +157,6 @@ func main() {
 		runFunc = func(ctx context.Context) {
 			nm.Run(ctx)
 		}
-	}
-
-	w, err := watcher.NewWatcher(ctx, sm)
-	if err != nil {
-		log.Error("Failed to create NetworkManager: ", err)
-		os.Exit(1)
-	}
-	runFunc = func(ctx context.Context) {
-		w.Run(ctx)
 	}
 
 	wg := sync.WaitGroup{}
