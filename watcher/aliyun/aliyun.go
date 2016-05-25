@@ -1,4 +1,4 @@
-package watcher
+package aliyun
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 	log "github.com/coreos/flannel/Godeps/_workspace/src/github.com/golang/glog"
 	"github.com/coreos/flannel/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/coreos/flannel/subnet"
+	"github.com/coreos/flannel/watcher"
 	"github.com/denverdino/aliyungo/common"
 	"github.com/denverdino/aliyungo/ecs"
 )
@@ -20,7 +21,6 @@ const (
 )
 
 type Watcher struct {
-	ctx               context.Context
 	sm                subnet.Manager
 	rl                []Route
 	access_key_id     string
@@ -28,6 +28,8 @@ type Watcher struct {
 	region            string
 	vpc_id            string
 	route_table_id    string
+
+	OverwriteMismatch bool
 }
 
 type Route struct {
@@ -37,15 +39,19 @@ type Route struct {
 	Flags int
 }
 
-func NewWatcher(ctx context.Context, sm subnet.Manager) (*Watcher, error) {
+func init() {
+	watcher.RegisterBackend("aliyun", NewWatcher)
+}
+
+func NewWatcher(sm subnet.Manager) (watcher.Watcher, error) {
 	watcher := &Watcher{
-		ctx:               ctx,
 		sm:                sm,
 		access_key_id:     os.Getenv("ALIYUN_ACCESS_KEY_ID"),
 		access_key_secret: os.Getenv("ALIYUN_ACCESS_KEY_SECRET"),
 		region:            os.Getenv("ALIYUN_REGION"),
 		vpc_id:            os.Getenv("ALIYUN_VPC_ID"),
 		route_table_id:    os.Getenv("ALIYUN_ROUTE_TABLE_ID"),
+		OverwriteMismatch: true,
 	}
 	return watcher, nil
 }
@@ -53,7 +59,7 @@ func NewWatcher(ctx context.Context, sm subnet.Manager) (*Watcher, error) {
 func (w *Watcher) Run(ctx context.Context) {
 	wg := sync.WaitGroup{}
 
-	log.Info("Watching for new subnet leases")
+	log.Info("Aliyun watcher is Watching for new subnet leases")
 	evts := make(chan []subnet.Event)
 	wg.Add(1)
 	go func() {
@@ -100,7 +106,11 @@ func (w *Watcher) handleSubnetEvents(batch []subnet.Event) {
 			w.addToRouteList(route)
 			err := w.createVPCRoute(route)
 			if err != nil {
-				log.Errorf("Error creating route:", err.Error())
+				if err2, ok := err.(*common.Error); ok && err2.Code == "InvalidCIDRBlock.Duplicate" {
+					log.Warningf("Duplicate route %+v. Will double check when syncing.", route)
+				} else {
+					log.Errorf("Error creating route:", err.Error())
+				}
 			}
 
 		case subnet.EventRemoved:
@@ -183,9 +193,6 @@ func (w *Watcher) removeVPCRoute(route Route) (err error) {
 	}
 	client := ecs.NewClient(w.access_key_id, w.access_key_secret)
 	err = client.DeleteRouteEntry(args)
-	if err != nil {
-		log.Errorf("Error deleting route to %v: %v, %v", route.Dst, route.Gw, err)
-	}
 	return
 }
 
@@ -210,9 +217,6 @@ func (w *Watcher) createVPCRoute(route Route) (err error) {
 		NextHopId:            instanceId,
 	}
 	err = client.CreateRouteEntry(args)
-	if err != nil {
-		log.Errorf("Error adding route to %v: %v, %v", route.Dst, route.Gw, err)
-	}
 	return
 }
 
@@ -244,17 +248,39 @@ func (w *Watcher) checkSubnetExistInRoutes() {
 	}
 
 	for _, route := range w.rl {
+		var (
+			instanceId string
+			ok         bool
+		)
 		exist := false
 		for _, r := range entries.RouteEntry {
 			if r.DestinationCidrBlock == route.Dst.String() {
-				if _, ok := ip2id[route.Gw.String()]; ok {
+				if instanceId, ok = ip2id[route.Gw.String()]; ok && instanceId == r.InstanceId {
 					exist = true
+					break
+				} else {
+					log.Warningf("A route with the same CIDR and a different nexthop exists in the VPC. %+v != %+v", r, route)
+					if w.OverwriteMismatch {
+						log.Infof("Will try to remove the mismatched route")
+						args := &ecs.DeleteRouteEntryArgs{
+							RouteTableId:         w.route_table_id,
+							DestinationCidrBlock: r.DestinationCidrBlock,
+							NextHopId:            r.InstanceId,
+						}
+						err := client.DeleteRouteEntry(args)
+						if err != nil {
+							log.Errorf("Error deleting the mismatched route:", err.Error())
+						}
+					} else {
+						log.Infof("Will ignore the mismatched route")
+						exist = true
+					}
 					break
 				}
 			}
 		}
 		if !exist {
-			if instanceId, ok := ip2id[route.Gw.String()]; ok {
+			if instanceId, ok = ip2id[route.Gw.String()]; ok {
 				args3 := &ecs.CreateRouteEntryArgs{
 					RouteTableId:         w.route_table_id,
 					DestinationCidrBlock: route.Dst.String(),

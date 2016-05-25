@@ -40,6 +40,9 @@ import (
 	_ "github.com/coreos/flannel/backend/hostgw"
 	_ "github.com/coreos/flannel/backend/udp"
 	_ "github.com/coreos/flannel/backend/vxlan"
+
+	// Watcher backend
+	_ "github.com/coreos/flannel/watcher/aliyun"
 )
 
 type CmdLineOpts struct {
@@ -139,7 +142,7 @@ func main() {
 			remote.RunServer(ctx, sm, opts.listen, opts.remoteCAFile, opts.remoteCertfile, opts.remoteKeyfile)
 		}
 	case opts.watch != "":
-		w, err := watcher.NewWatcher(ctx, sm)
+		w, err := watcher.NewWatcher(opts.watch, sm)
 		if err != nil {
 			log.Error("Failed to create Watcher: ", err)
 			os.Exit(1)
