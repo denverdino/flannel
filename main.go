@@ -141,7 +141,7 @@ func main() {
 	case opts.watch != "":
 		w, err := watcher.NewWatcher(ctx, sm)
 		if err != nil {
-			log.Error("Failed to create NetworkManager: ", err)
+			log.Error("Failed to create Watcher: ", err)
 			os.Exit(1)
 		}
 		runFunc = func(ctx context.Context) {

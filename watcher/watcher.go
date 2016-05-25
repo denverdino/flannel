@@ -87,7 +87,7 @@ func (w *Watcher) handleSubnetEvents(batch []subnet.Event) {
 		case subnet.EventAdded:
 			log.Infof("Subnet added: %v via %v", evt.Lease.Subnet, evt.Lease.Attrs.PublicIP)
 
-			if evt.Lease.Attrs.BackendType != "alloc" {
+			if evt.Lease.Attrs.BackendType != "" && evt.Lease.Attrs.BackendType != "alloc" {
 				log.Warningf("Ignoring non-alloc subnet: type=%v", evt.Lease.Attrs.BackendType)
 				continue
 			}
@@ -106,7 +106,7 @@ func (w *Watcher) handleSubnetEvents(batch []subnet.Event) {
 		case subnet.EventRemoved:
 			log.Info("Subnet removed: ", evt.Lease.Subnet)
 
-			if evt.Lease.Attrs.BackendType != "alloc" {
+			if evt.Lease.Attrs.BackendType != "" && evt.Lease.Attrs.BackendType != "alloc" {
 				log.Warningf("Ignoring non-alloc subnet: type=%v", evt.Lease.Attrs.BackendType)
 				continue
 			}
